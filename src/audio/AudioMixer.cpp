@@ -12,6 +12,8 @@ static constexpr float AUDIO_MIXER_PI = 3.14159265358979323846f;
 
 void AudioMixer::_bind_methods() {
     ClassDB::bind_static_method("AudioMixer", D_METHOD("mix_buffers", "buffers", "master_gain"), &AudioMixer::mix_buffers, DEFVAL(1.0f));
+    
+    ClassDB::bind_static_method("AudioMixer", D_METHOD("resample_bytes", "data", "speed"), &AudioMixer::resample_bytes);
 
     ClassDB::bind_static_method("AudioMixer", D_METHOD("bytes_to_vector2", "data"), &AudioMixer::bytes_to_vector2);
     ClassDB::bind_static_method("AudioMixer", D_METHOD("vector2_to_bytes", "data"), &AudioMixer::vector2_to_bytes);
@@ -68,6 +70,36 @@ PackedByteArray AudioMixer::mix_buffers(Array buffers, float master_gain) {
         result_ptr[i] = AudioMixer::sample_soft_clip(sample);
     }
 
+    return result;
+}
+
+PackedByteArray AudioMixer::resample_bytes(PackedByteArray data, float speed) {
+    if (data.is_empty() || speed <= 0.0f || std::fabs(speed - 1.0f) < 1e-4f) return data;
+
+    const int in_frames = data.size() / (int)(sizeof(float) * 2);
+    if (in_frames <= 0) return data;
+
+    const int out_frames = std::max(1, (int)((double)in_frames / (double)speed));
+
+    PackedByteArray result;
+    result.resize((int64_t)out_frames * 2 * (int64_t)sizeof(float));
+
+    const float* src = reinterpret_cast<const float*>(data.ptr());
+    float* dst = reinterpret_cast<float*>(result.ptrw());
+    const int last = in_frames - 1;
+
+    for (int i = 0; i < out_frames; i++) {
+        const double pos = (double)i * (double)speed;
+        int i0 = (int)pos;
+        const float t = (float)(pos - (double)i0);
+        i0 = std::min(i0, last);
+        const int i1 = std::min(i0 + 1, last);
+
+        const float* a = src + i0 * 2;
+        const float* b = src + i1 * 2;
+        dst[i * 2]     = a[0] + (b[0] - a[0]) * t;
+        dst[i * 2 + 1] = a[1] + (b[1] - a[1]) * t;
+    }
     return result;
 }
 

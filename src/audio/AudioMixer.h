@@ -19,6 +19,8 @@ public:
     ~AudioMixer();
 
     static PackedByteArray mix_buffers(Array buffers, float master_gain = 1.0f);
+    
+    static PackedByteArray resample_bytes(PackedByteArray data, float speed);
 
     static PackedVector2Array bytes_to_vector2(PackedByteArray data);
     static PackedByteArray vector2_to_bytes(PackedVector2Array data);
