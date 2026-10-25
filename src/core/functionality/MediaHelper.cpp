@@ -1,134 +1,132 @@
 #include "core/functionality/MediaHelper.h"
 #include <godot_cpp/core/class_db.hpp>
 #include <algorithm>
-#include <vector>
+#include <cmath>
 
 using namespace godot;
 
 Ref<Gradient> MediaHelper::waveform_gradient;
-std::unordered_map<int64_t, PackedByteArray> MediaHelper::audio_data_ids;
 
 void MediaHelper::_bind_methods() {
-	ClassDB::bind_static_method("MediaHelper", D_METHOD("get_waveform_gradient"), &MediaHelper::get_waveform_gradient);
-	ClassDB::bind_static_method("MediaHelper", D_METHOD("set_waveform_gradient", "new_val"), &MediaHelper::set_waveform_gradient);
+    ClassDB::bind_static_method("MediaHelper", D_METHOD("get_waveform_gradient"), &MediaHelper::get_waveform_gradient);
+    ClassDB::bind_static_method("MediaHelper", D_METHOD("set_waveform_gradient", "new_val"), &MediaHelper::set_waveform_gradient);
 
-	ClassDB::bind_static_method("MediaHelper", D_METHOD("push_audio_data", "data_id", "data"), &MediaHelper::push_audio_data);
-	ClassDB::bind_static_method("MediaHelper", D_METHOD("free_audio_data", "data_id"), &MediaHelper::free_audio_data);
+    ClassDB::bind_static_method("MediaHelper", D_METHOD("build_peak_map", "data", "peaks_per_second", "max_frames_per_peak"), &MediaHelper::build_peak_map, DEFVAL(0));
+    ClassDB::bind_static_method("MediaHelper", D_METHOD("render_waveform", "peaks", "pixel_from", "peaks_span", "pixels_span", "image_format", "width", "height", "space_width", "line_width", "global_peak", "style", "bg_color"), &MediaHelper::render_waveform);
 
-	ClassDB::bind_static_method("MediaHelper", D_METHOD("generate_waveform_image", "data_id", "second_from", "second_to", "image_format", "width", "height", "space_width", "line_width", "draw_method_idx", "bg_color"), &MediaHelper::generate_waveform_image, DEFVAL(0), DEFVAL(Color()));
+    BIND_ENUM_CONSTANT(STYLE_THUMBNAIL);
+    BIND_ENUM_CONSTANT(STYLE_TIMELINE);
 }
 
 Ref<Gradient> MediaHelper::get_waveform_gradient() {
-	return waveform_gradient;
+    return waveform_gradient;
 }
 
 void MediaHelper::set_waveform_gradient(const Ref<Gradient> &new_val) {
-	waveform_gradient = new_val;
+    waveform_gradient = new_val;
 }
 
-void MediaHelper::push_audio_data(int64_t data_id, const PackedByteArray &data) {
-	audio_data_ids.try_emplace(data_id, data);
+Dictionary MediaHelper::build_peak_map(const PackedByteArray &data, int peaks_per_second, int max_frames_per_peak) {
+    peaks_per_second = std::max(1, peaks_per_second);
+    
+    PackedFloat32Array peaks;
+    float global_peak = 0.0f;
+    
+    const int64_t frame_count = data.size() / (int64_t)(sizeof(float) * AUDIO_CHANNELS);
+    
+    if (frame_count > 0) {
+        const float *samples = reinterpret_cast<const float *>(data.ptr());
+
+        // ceil(frame_count * peaks_per_second / sample_rate)
+        const int64_t peak_count = (frame_count * peaks_per_second + AUDIO_SAMPLE_RATE - 1) / AUDIO_SAMPLE_RATE;
+        peaks.resize(peak_count);
+        float *out = peaks.ptrw();
+
+        for (int64_t p = 0; p < peak_count; p++) {
+            // Integer slice edges: neighbouring slices share a boundary, so nothing drifts on long files.
+            const int64_t f0 = p * AUDIO_SAMPLE_RATE / peaks_per_second;
+            const int64_t f1 = std::min<int64_t>((p + 1) * AUDIO_SAMPLE_RATE / peaks_per_second, frame_count);
+
+            int64_t stride = 1;
+            if (max_frames_per_peak > 0 && f1 - f0 > max_frames_per_peak) {
+                stride = (f1 - f0 + max_frames_per_peak - 1) / max_frames_per_peak;
+            }
+
+            float peak = 0.0f;
+            for (int64_t f = f0; f < f1; f += stride) {
+                const float value = (std::fabs(samples[f * AUDIO_CHANNELS]) + std::fabs(samples[f * AUDIO_CHANNELS + 1])) * 0.5f;
+                // isfinite: one corrupt sample (inf) must not flatten the whole file after normalising.
+                if (value > peak && std::isfinite(value)) {
+                    peak = value;
+                }
+            }
+            
+            out[p] = peak;
+            global_peak = std::max(global_peak, peak);
+        }
+    }
+    
+    Dictionary result;
+    result["peaks"] = peaks;
+    result["peak"] = global_peak;
+    result["peaks_per_second"] = peaks_per_second;
+    return result;
 }
 
-void MediaHelper::free_audio_data(int64_t data_id) {
-	audio_data_ids.erase(data_id);
+Ref<Image> MediaHelper::render_waveform(const PackedFloat32Array &peaks, int64_t pixel_from, int64_t peaks_span, int64_t pixels_span, Image::Format image_format, int width, int height, int space_width, int line_width, float global_peak, int style, Color bg_color) {
+    if (width < 1 || height < 1 || pixels_span < 1 || peaks_span < 0 || line_width < 1 || space_width < 0) {
+        return nullptr;
+    }
+
+    Ref<Image> image = Image::create_empty(width, height, false, image_format);
+    if (image.is_null()) {
+        return nullptr;
+    }
+    image->fill(bg_color);
+
+    const int step_width = space_width + line_width;
+    const int lines_count = (width + step_width - 1) / step_width;
+
+    const float *src = peaks.ptr();
+    const int64_t peak_count = peaks.size();
+    const float norm = global_peak > 0.0f ? 1.0f / global_peak : 1.0f;
+
+    for (int line = 0; line < lines_count; line++) {
+        const int x = line * step_width;
+        const int64_t abs_pixel = pixel_from + x;
+        
+        // Peaks covered by this line: [a, b). Exact integer math: no gaps or overlaps between lines or chunks.
+        const int64_t a = abs_pixel * peaks_span / pixels_span;
+        int64_t b = (abs_pixel + step_width) * peaks_span / pixels_span;
+        if (b <= a) {
+            b = a + 1;
+        }
+        
+        float amplitude = 0.0f;
+        for (int64_t i = std::max<int64_t>(a, 0); i < b && i < peak_count; i++) {
+            amplitude = std::max(amplitude, src[i]);
+        }
+
+        draw_line(image, style, height, line_width, x, std::min(amplitude * norm, 1.0f));
+    }
+
+    image->generate_mipmaps();
+    return image;
 }
 
-Ref<Image> MediaHelper::generate_waveform_image(int64_t data_id, double second_from, double second_to, Image::Format image_format, int width, int height, int space_width, int line_width, int draw_method_idx, Color bg_color) {
-	auto it = audio_data_ids.find(data_id);
-	if (it == audio_data_ids.end()) return nullptr;
+void MediaHelper::draw_line(const Ref<Image> &image, int style, int height, int line_width, int x, float amplitude) {
+    const int line_height = std::max(1, (int)(amplitude * height));
+    const Vector2i pos(x, (int)(height / 2.0f - line_height / 2.0f));
+    const Vector2i size(line_width, line_height);
 
-	DrawWaveformAction draw_method = draw_method_idx == 0 ? draw_waveform_line_thumbnail : draw_waveform_line_timeline;
-
-	Ref<Image> image = Image::create_empty(width, height, false, image_format);
-	image->fill(bg_color);
-
-	const PackedByteArray &raw_data = it->second;
-
-	int channels = 2;
-	int sample_rate = 48000;
-	int bytes_per_sample = 4;
-	int bytes_per_frame = bytes_per_sample * channels;
-
-	const float *float_data = reinterpret_cast<const float *>(raw_data.ptr());
-	int64_t float_count = raw_data.size() / bytes_per_sample;
-
-	double length = raw_data.size() / (double)(bytes_per_frame * sample_rate);
-	second_to = MIN(second_to, length);
-	double duration = second_to - second_from;
-
-	int start_sample = (int)(second_from * sample_rate);
-	int total_samples_to_process = (int)(duration * sample_rate);
-
-	int samples_per_pixel = total_samples_to_process / width;
-	if (samples_per_pixel < 1) samples_per_pixel = 1;
-
-	int step_width = space_width + line_width;
-	int lines_count = width / step_width;
-
-	int samples_step = 1;
-	if (samples_per_pixel > 100000) samples_step = 10000;
-	else if (samples_per_pixel > 10000) samples_step = 1000;
-	else if (samples_per_pixel > 1000) samples_step = 100;
-	else if (samples_per_pixel > 100) samples_step = 10;
-
-	std::vector<float> amplitudes;
-	amplitudes.reserve(lines_count);
-
-	for (int x = 0; x < lines_count; x++) {
-		int pixel_x = x * step_width;
-
-		int64_t curr_sample_idx = (start_sample + (pixel_x * samples_per_pixel)) * channels;
-		int64_t end_sample_idx = curr_sample_idx + (samples_per_pixel * channels);
-
-		float max_amplitude = 0.0f;
-
-		if (curr_sample_idx >= float_count) {
-			amplitudes.push_back(0.0f);
-			continue;
-		}
-		end_sample_idx = MIN(end_sample_idx, float_count);
-
-		for (int64_t s = curr_sample_idx; s < end_sample_idx - 1; s += 2 * samples_step) {
-			float abs1 = Math::abs(float_data[s]);
-			float abs2 = Math::abs(float_data[s + 1]);
-
-			float sample_value = (abs1 + abs2) * 0.5f;
-			if (sample_value > max_amplitude) max_amplitude = sample_value;
-		}
-
-		amplitudes.push_back(max_amplitude);
-	}
-
-	float max_amplitude_glob = amplitudes.empty() ? 0.0f : *std::max_element(amplitudes.begin(), amplitudes.end());
-	float amplitude_multiplier = max_amplitude_glob > 0.0f ? 1.0f / max_amplitude_glob : 1.0f;
-
-	for (size_t idx = 0; idx < amplitudes.size(); idx++) {
-		draw_method(image, width, height, line_width, (int)idx * step_width, amplitudes[idx] * amplitude_multiplier);
-	}
-
-	image->generate_mipmaps();
-	return image;
-}
-
-void MediaHelper::draw_waveform_line_thumbnail(Ref<Image> image, int width, int height, int line_width, int x, double sample) {
-	float offset = x / (float)image->get_width();
-	int height_half = height / 2;
-	int sample_height = (int)(sample * height);
-
-	Vector2i pos = Vector2i(x, (int)(height_half - sample_height / 2.0f));
-	Vector2i size = Vector2i(line_width, MAX(1, sample_height));
-
-	image->fill_rect(Rect2i(pos, size), waveform_gradient->sample(offset));
-}
-
-void MediaHelper::draw_waveform_line_timeline(Ref<Image> image, int width, int height, int line_width, int x, double sample) {
-	int height_half = height / 2;
-	int sample_height = (int)(sample * height);
-
-	Vector2i pos = Vector2i(x, (int)(height_half - sample_height / 2.0f));
-	Vector2i size = Vector2i(line_width, MAX(1, sample_height));
-
-	Color color = Color(Color(0, 0, 0), 0.6f);
-	image->fill_rect(Rect2i(pos, size), color);
+    if (style == STYLE_THUMBNAIL) {
+        // Colour follows the position along the image (left to right).
+        Color color(1, 1, 1, 1);
+        if (waveform_gradient.is_valid()) {
+            color = waveform_gradient->sample(x / (float)image->get_width());
+        }
+        image->fill_rect(Rect2i(pos, size), color);
+    } else {
+        image->fill_rect(Rect2i(pos, size), Color(0, 0, 0, 0.6f));
+    }
 }

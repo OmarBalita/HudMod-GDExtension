@@ -1,4 +1,5 @@
 #pragma once
+#include "godot_cpp/variant/array.hpp"
 #include <godot_cpp/classes/audio_stream_player.hpp>
 #include <godot_cpp/classes/audio_stream_generator.hpp>
 #include <godot_cpp/classes/audio_stream_generator_playback.hpp>
@@ -10,7 +11,9 @@ class CustomAudioStreamPlayer: public AudioStreamPlayer {
 
 private:
     Ref<AudioStreamGeneratorPlayback> generator_playback;
-
+    
+    Array active_effects;
+ 
     void _fill_buffer();
 
 protected:
@@ -28,11 +31,11 @@ public:
 
     PackedByteArray get_data() const {return _data;}
     void set_data(const PackedByteArray &new_data) {_data = new_data;}
-
+    
     CustomAudioStreamPlayer();
     ~CustomAudioStreamPlayer();
 
-    void play(float at);
+    void play(float at, Array effects = Array());
     void seek(float position);
     void stop();
 

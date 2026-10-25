@@ -83,15 +83,15 @@ output_path = "{}libhudmod{}{}".format(out_dir, env["suffix"], env["SHLIBSUFFIX"
 library = env.SharedLibrary(output_path, source=sources)
 
 # Copy the ffmpeg dynamic libraries
-# ffmpeg_shared_libs = (
-#     glob.glob(os.path.join(ffmpeg_lib_path, "*.so*")) +
-#     glob.glob(os.path.join(ffmpeg_lib_path, "*.dll"))
-# )
-# 
-# os.makedirs(out_dir, exist_ok=True)
-# for lib in ffmpeg_shared_libs:
-#     shutil.copy2(lib, out_dir)
-#     print("Copied: {} -> {}".format(os.path.basename(lib), out_dir))
+ffmpeg_shared_libs = (
+    glob.glob(os.path.join(ffmpeg_lib_path, "*.so*")) +
+    glob.glob(os.path.join(ffmpeg_lib_path, "*.dll"))
+)
+
+os.makedirs(out_dir, exist_ok=True)
+for lib in ffmpeg_shared_libs:
+    shutil.copy2(lib, out_dir)
+    print("Copied: {} -> {}".format(os.path.basename(lib), out_dir))
 
 # Copy .gdextension file
 shutil.copy2("./gdextension/hudmod.gdextension", os.path.join(out_dir, ".."))
